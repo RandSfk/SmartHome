@@ -7,7 +7,7 @@ import paho.mqtt.client as mqtt
 MQTT_BROKER = "maqiatto.com"
 MQTT_PORT = 1883
 MQTT_USERNAME = "rndxft@gmail.com"
-MQTT_PASSWORD = "PASSWORD_MAQIATTO_KAMU"
+MQTT_PASSWORD = "Testing27"
 MQTT_TOPIC = "smartlamp"
 
 client = mqtt.Client(client_id="flask-dashboard")
