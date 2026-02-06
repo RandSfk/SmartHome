@@ -1,177 +1,194 @@
-from flask import Flask, jsonify, render_template_string, request
+# app.py
+from flask import Flask, request, jsonify, render_template_string
 import paho.mqtt.client as mqtt
 import json
-import threading
 import time
+import threading
 
+# ====== CONFIG (ganti kalau perlu) ======
+WIFI_SSID = "Wokwi-GUEST"   # (hanya info, Flask ga butuh)
 MQTT_BROKER = "maqiatto.com"
 MQTT_PORT = 1883
 MQTT_USERNAME = "rndxft@gmail.com"
 MQTT_PASSWORD = "Testing27"
-BASE_TOPIC = "rndxft@gmail.com/smartlamp"
-CMD_TOPIC = BASE_TOPIC + "/cmd"
-STATUS_TOPIC = BASE_TOPIC + "/status"
-MQTT_CLIENT_ID = "flask-dashboard-1"
+MQTT_CLIENT_ID = "flask-controller-rndxft-01"
+MQTT_TOPIC = "rndxft@gmail.com/smartlamp"
+# ========================================
 
 app = Flask(__name__)
+
+# current server-known state (dipakai untuk UI)
 state = {"led1": False, "led2": False}
-state_lock = threading.Lock()
 
-HTML = """
-<!DOCTYPE html>
+# ---- MQTT client setup ----
+mqtt_client = mqtt.Client(client_id=MQTT_CLIENT_ID)
+
+
+def on_connect(client, userdata, flags, rc):
+    print("MQTT connected, rc=", rc)
+    # optional: subscribe untuk menerima updates (ESP bisa publish status back)
+    client.subscribe(MQTT_TOPIC)
+
+
+def on_message(client, userdata, msg):
+    try:
+        payload = msg.payload.decode('utf-8')
+        print("MQTT <=", payload)
+        data = json.loads(payload)
+        # update local state if payload contains led keys
+        if isinstance(data, dict):
+            if 'led1' in data:
+                state['led1'] = bool(data['led1'])
+            if 'led2' in data:
+                state['led2'] = bool(data['led2'])
+    except Exception as e:
+        print("Error parsing message:", e)
+
+
+mqtt_client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
+mqtt_client.on_connect = on_connect
+mqtt_client.on_message = on_message
+
+def mqtt_connect_loop():
+    while True:
+        try:
+            mqtt_client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
+            mqtt_client.loop_start()
+            break
+        except Exception as e:
+            print("MQTT connect failed:", e)
+            time.sleep(3)
+
+# Start MQTT connection in background thread so Flask startup is smooth
+threading.Thread(target=mqtt_connect_loop, daemon=True).start()
+
+# ---- Helper to publish state ----
+def publish_state(payload_dict):
+    payload = json.dumps(payload_dict)
+    # publish retained so ESP32 receives last known state when it connects
+    result = mqtt_client.publish(MQTT_TOPIC, payload, qos=1, retain=True)
+    # optional: wait for result
+    result.wait_for_publish()
+    print("MQTT =>", payload)
+    # update local copy
+    if 'led1' in payload_dict:
+        state['led1'] = bool(payload_dict['led1'])
+    if 'led2' in payload_dict:
+        state['led2'] = bool(payload_dict['led2'])
+    return result.rc == mqtt.MQTT_ERR_SUCCESS
+
+# ---- Flask endpoints ----
+
+# Simple UI
+INDEX_HTML = """
+<!doctype html>
 <html>
-<head>
-    <title>Smart Lamp Dashboard</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+  <head>
+    <meta charset="utf-8" />
+    <title>SmartLamp Controller</title>
     <style>
-        body { font-family: Arial, sans-serif; background:#111; color:#fff; display:flex; flex-direction:column; align-items:center; padding-top:40px; }
-        .card { background:#222; padding:20px; border-radius:12px; width:320px; margin-bottom:12px; text-align:center; }
-        button { width:100%; padding:14px; font-size:18px; border-radius:10px; border:none; cursor:pointer; }
-        .on { background:#4CAF50; color:white; } .off { background:#555; color:white; }
-        .row { display:flex; gap:8px; } .small { padding:8px; font-size:14px; }
+      body { font-family: system-ui, sans-serif; padding: 30px; }
+      .card { display:inline-block; padding:20px; border-radius:8px; box-shadow:0 4px 10px rgba(0,0,0,0.08); margin:10px; }
+      button{ padding:10px 14px; margin:6px; cursor:pointer; }
+      .on { background: #2ecc71; color: white; border: none; }
+      .off { background: #e74c3c; color:white; border:none; }
     </style>
-</head>
-<body>
-    <h1>Smart Lamp (MQTT Remote)</h1>
+  </head>
+  <body>
+    <h1>SmartLamp Controller</h1>
+    <div id="status">Connecting...</div>
 
     <div class="card">
-        <h2>Lampu 1</h2>
-        <div class="row">
-            <button class="small on" onclick="setOne(1,true)">ON</button>
-            <button class="small off" onclick="setOne(1,false)">OFF</button>
-            <button class="{{ 'on' if led1 else 'off' }}" style="flex:1" onclick="toggle(1)">{{ 'ON' if led1 else 'OFF' }}</button>
-        </div>
+      <h3>LED 1</h3>
+      <button onclick="setLed('led1', true)" class="on">ON</button>
+      <button onclick="setLed('led1', false)" class="off">OFF</button>
+      <div>State: <span id="led1_state">-</span></div>
     </div>
 
     <div class="card">
-        <h2>Lampu 2</h2>
-        <div class="row">
-            <button class="small on" onclick="setOne(2,true)">ON</button>
-            <button class="small off" onclick="setOne(2,false)">OFF</button>
-            <button class="{{ 'on' if led2 else 'off' }}" style="flex:1" onclick="toggle(2)">{{ 'ON' if led2 else 'OFF' }}</button>
-        </div>
+      <h3>LED 2</h3>
+      <button onclick="setLed('led2', true)" class="on">ON</button>
+      <button onclick="setLed('led2', false)" class="off">OFF</button>
+      <div>State: <span id="led2_state">-</span></div>
     </div>
 
-    <div class="card">
-        <h2>All</h2>
-        <div class="row">
-            <button class="small on" onclick="setAll(true)">ALL ON</button>
-            <button class="small off" onclick="setAll(false)">ALL OFF</button>
-            <button class="small off" onclick="refresh()">REFRESH</button>
-        </div>
-        <p id="statusline"></p>
-    </div>
+    <script>
+      async function fetchState(){
+        try{
+          const r = await fetch('/api/state');
+          const j = await r.json();
+          document.getElementById('led1_state').innerText = j.led1;
+          document.getElementById('led2_state').innerText = j.led2;
+          document.getElementById('status').innerText = 'Connected to controller';
+        }catch(e){
+          document.getElementById('status').innerText = 'Failed to contact controller';
+        }
+      }
 
-<script>
-function toggle(id){
-    fetch('/toggle/' + id, {method:'POST'}).then(r=>r.json()).then(updateUI);
-}
-function setOne(id, val){
-    fetch('/set', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(id===1?{led1:val}:{led2:val})}).then(r=>r.json()).then(updateUI);
-}
-function setAll(val){
-    fetch('/set', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({led1:val, led2:val})}).then(r=>r.json()).then(updateUI);
-}
-function refresh(){ fetch('/status').then(r=>r.json()).then(updateUI); }
-function updateUI(data){ document.getElementById('statusline').innerText = 'Status: ' + JSON.stringify(data); setTimeout(()=>location.reload(), 300); }
-</script>
-</body>
+      async function setLed(led, value){
+        const body = {};
+        body[led] = value;
+        await fetch('/api/state', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(body)
+        });
+        await fetchState();
+      }
+
+      // poll state every 2s
+      fetchState();
+      setInterval(fetchState, 2000);
+    </script>
+  </body>
 </html>
 """
 
-client = mqtt.Client(client_id=MQTT_CLIENT_ID, clean_session=True)
-client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
-
-def on_connect(c, userdata, flags, rc):
-    print("MQTT connected rc=", rc)
-    c.subscribe(STATUS_TOPIC, qos=1)
-
-def on_message(c, userdata, msg):
-    try:
-        payload = msg.payload.decode('utf-8')
-        data = json.loads(payload)
-        with state_lock:
-            if isinstance(data, dict):
-                if 'led1' in data: state['led1'] = bool(data['led1'])
-                if 'led2' in data: state['led2'] = bool(data['led2'])
-        print("Updated state from device:", state)
-    except Exception as e:
-        print("bad status payload", e, msg.payload)
-
-client.on_connect = on_connect
-client.on_message = on_message
-
-def mqtt_loop():
-    while True:
-        try:
-            if not client.is_connected():
-                client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
-                client.loop_start()
-        except Exception as e:
-            print("mqtt connect error", e)
-        time.sleep(3)
-
-t = threading.Thread(target=mqtt_loop, daemon=True)
-t.start()
-
 @app.route("/")
-def dashboard():
-    with state_lock:
-        return render_template_string(HTML, led1=state["led1"], led2=state["led2"])
+def index():
+    return render_template_string(INDEX_HTML)
 
-@app.route("/status", methods=["GET"])
-def get_status():
-    with state_lock:
-        return jsonify(state)
+# Get current known state
+@app.route("/api/state", methods=["GET"])
+def api_get_state():
+    return jsonify(state)
 
-def publish_cmd(payload_dict):
-    p = json.dumps(payload_dict, separators=(',',':'))
+# Set state for one or both leds using JSON body
+# Example bodies:
+# {"led1": true} or {"led2": false} or {"led1": true, "led2": false}
+@app.route("/api/state", methods=["POST"])
+def api_set_state():
     try:
-        client.publish(CMD_TOPIC, p, qos=1, retain=False)
-    except Exception as e:
-        print("publish error", e)
+        data = request.get_json(force=True)
+        if not isinstance(data, dict):
+            return jsonify({"ok": False, "error": "JSON object expected"}), 400
 
-def publish_status():
-    with state_lock:
-        p = json.dumps(state, separators=(',',':'))
-    try:
-        client.publish(STATUS_TOPIC, p, qos=1, retain=True)
-    except Exception as e:
-        print("status publish error", e)
+        payload = {}
+        if 'led1' in data:
+            payload['led1'] = bool(data['led1'])
+        if 'led2' in data:
+            payload['led2'] = bool(data['led2'])
 
-@app.route("/toggle/<int:led>", methods=["POST"])
-def toggle_led(led):
-    with state_lock:
-        if led == 1:
-            state["led1"] = not state["led1"]
-            payload = {"led1": state["led1"]}
-        elif led == 2:
-            state["led2"] = not state["led2"]
-            payload = {"led2": state["led2"]}
+        if not payload:
+            return jsonify({"ok": False, "error": "No led1/led2 keys found"}), 400
+
+        ok = publish_state(payload)
+        if ok:
+            return jsonify({"ok": True, "published": payload})
         else:
-            return jsonify({"error":"invalid led"}),400
-    publish_cmd(payload)
-    publish_status()
-    return jsonify(state)
+            return jsonify({"ok": False, "error": "MQTT publish failed"}), 500
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
-@app.route("/set", methods=["POST"])
-def set_route():
-    try:
-        body = request.get_json(force=True)
-    except:
-        return jsonify({"error":"invalid json"}),400
-    changed = {}
-    with state_lock:
-        if "led1" in body:
-            state["led1"] = bool(body["led1"]); changed["led1"] = state["led1"]
-        if "led2" in body:
-            state["led2"] = bool(body["led2"]); changed["led2"] = state["led2"]
-    if not changed:
-        return jsonify({"error":"no led in payload"}),400
-    publish_cmd(changed)
-    publish_status()
-    return jsonify(state)
+# Convenience route to toggle single led using path (optional)
+@app.route("/api/led/<led_name>/<action>", methods=["POST"])
+def api_led_action(led_name, action):
+    if led_name not in ("led1", "led2"):
+        return jsonify({"ok": False, "error": "led must be led1 or led2"}), 400
+    val = action.lower() in ("on", "1", "true", "t")
+    ok = publish_state({led_name: val})
+    return jsonify({"ok": ok, "led": led_name, "state": val})
 
 if __name__ == "__main__":
-    time.sleep(1)
+    print("Starting Flask MQTT controller...")
     app.run(host="0.0.0.0", port=5000, debug=True)
