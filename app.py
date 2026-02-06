@@ -4,24 +4,17 @@ import json
 import threading
 import time
 
-# ======================
-# CONFIG
-# ======================
 MQTT_BROKER = "maqiatto.com"
 MQTT_PORT = 1883
 MQTT_USERNAME = "rndxft@gmail.com"
 MQTT_PASSWORD = "Testing27"
 
-# Topics: follow MaQiaTTo requirement (username prefix)
 BASE_TOPIC = "rndxft@gmail.com/smartlamp"
-CMD_TOPIC = f"{BASE_TOPIC}/cmd"       # publish commands here
-STATUS_TOPIC = f"{BASE_TOPIC}/status" # device publishes status here (retain)
+CMD_TOPIC = f"{BASE_TOPIC}/cmd"
+STATUS_TOPIC = f"{BASE_TOPIC}/status"
 
 MQTT_CLIENT_ID = "flask-dashboard-1"
 
-# ======================
-# FLASK + STATE
-# ======================
 app = Flask(__name__)
 
 state = {
@@ -102,25 +95,19 @@ function refresh(){
 }
 function updateUI(data){
     document.getElementById('statusline').innerText = 'Status: ' + JSON.stringify(data);
-    setTimeout(()=>location.reload(), 300); // small refresh to update buttons
+    setTimeout(()=>location.reload(), 300);
 }
 </script>
 </body>
 </html>
 """
 
-# ======================
-# MQTT CLIENT SETUP
-# ======================
 client = mqtt.Client(client_id=MQTT_CLIENT_ID, clean_session=True)
 client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
 
 def on_connect(clientc, userdata, flags, rc):
     print("MQTT connected with rc:", rc)
-    # subscribe to status topic so we can reflect real device state in UI
     clientc.subscribe(STATUS_TOPIC, qos=1)
-    # request retained state by publishing nothing (not necessary) —
-    # device should have retained last status on STATUS_TOPIC
 
 def on_message(clientc, userdata, msg):
     try:
@@ -128,7 +115,6 @@ def on_message(clientc, userdata, msg):
         print("MQTT message", msg.topic, payload)
         data = json.loads(payload)
         with state_lock:
-            # update only keys present
             if isinstance(data, dict):
                 if 'led1' in data:
                     state['led1'] = bool(data['led1'])
@@ -147,18 +133,13 @@ def mqtt_background_connect_loop():
                 print("Attempting MQTT connect...")
                 client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
                 client.loop_start()
-            # stay here and sleep; if connection lost, loop continues and tries again
         except Exception as e:
             print("MQTT connect error:", e)
         time.sleep(5)
 
-# start background thread for mqtt connect/reconnect
 t = threading.Thread(target=mqtt_background_connect_loop, daemon=True)
 t.start()
 
-# ======================
-# FLASK ROUTES
-# ======================
 @app.route("/")
 def dashboard():
     with state_lock:
@@ -182,21 +163,16 @@ def toggle_led(led):
             payload = json.dumps({"led2": new})
         else:
             return jsonify({"error": "invalid led"}), 400
-
-    # publish command (QoS=1)
     try:
         client.publish(CMD_TOPIC, payload, qos=1, retain=False)
     except Exception as e:
         print("Publish error:", e)
-
-    # optimistic update: also publish status for retain so device/logging sees current desired state
     try:
         with state_lock:
             s = json.dumps(state)
         client.publish(STATUS_TOPIC, s, qos=1, retain=True)
     except Exception as e:
         print("Status publish error:", e)
-
     return jsonify(state)
 
 @app.route("/set", methods=["POST"])
@@ -205,7 +181,6 @@ def set_route():
         body = request.get_json(force=True)
     except Exception:
         return jsonify({"error": "invalid json"}), 400
-
     changed = {}
     with state_lock:
         if "led1" in body:
@@ -214,30 +189,21 @@ def set_route():
         if "led2" in body:
             state["led2"] = bool(body["led2"])
             changed["led2"] = state["led2"]
-
     if not changed:
         return jsonify({"error": "no led in payload"}), 400
-
     payload = json.dumps(changed)
     try:
         client.publish(CMD_TOPIC, payload, qos=1, retain=False)
     except Exception as e:
         print("Publish error:", e)
-
-    # publish retained status
     try:
         with state_lock:
             s = json.dumps(state)
         client.publish(STATUS_TOPIC, s, qos=1, retain=True)
     except Exception as e:
         print("Status publish error:", e)
-
     return jsonify(state)
 
-# ======================
-# RUN
-# ======================
 if __name__ == "__main__":
-    # small delay so background thread can attempt initial connect before serving
     time.sleep(1)
     app.run(host="0.0.0.0", port=5000, debug=True)
